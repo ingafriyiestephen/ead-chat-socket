@@ -15,6 +15,8 @@ const io = new Server(server, {
   },
 });
 
+const PORT = process.env.PORT || 3001;
+
 // ---------------------- USER STORE ----------------------
 const onlineUsers = new Map();
 const idleTimers = {};
@@ -160,6 +162,7 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(3001, () => {
-  console.log("Socket.IO server running on http://localhost:3001");
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server is running on port ${PORT}`);
 });
