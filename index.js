@@ -98,10 +98,17 @@ io.on("connection", (socket) => {
         message: typeof data.message === "object" ? data.message.message : data.message,
         message_type: data.messageType || "text",
         created_at: new Date().toISOString(),
+        
+        // ADD THESE LINES - Include attachment data if present
+        attachment_url: data.attachment_url || null,
+        attachment_file: data.attachment_file || null,
+        attachment_name: data.attachment_name || null,
+        attachment_size: data.attachment_size || null,
+        attachment_type: data.attachment_type || null,
       };
-
+  
       io.to(`chat-${data.conversationId}`).emit("new-message", msg);
-      console.log("Broadcasting message:", msg);
+      console.log("Broadcasting message with attachment:", msg);
     } catch (error) {
       console.error("Error broadcasting message:", error);
       socket.emit("message-error", "Failed to broadcast message");
