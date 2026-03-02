@@ -213,6 +213,7 @@ io.on("connection", (socket) => {
         attachment_name: data.attachment_name || null,
         attachment_size: data.attachment_size || null,
         attachment_type: data.attachment_type || null,
+        audio_duration: data.audio_duration || null,
       };
   
       io.to(`chat-${data.conversationId}`).emit("new-message", msg);
