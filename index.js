@@ -22,6 +22,9 @@ const onlineUsers = new Map();
 const idleTimers = {};
 const IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
+// Store active live location sessions
+const liveLocationSessions = new Map(); // conversationId -> { userId, userType, startTime, duration, interval }
+
 // ---------------------- HELPERS ----------------------
 async function updateUserStatus(userId, status) {
   if (!userId) return;
@@ -61,10 +64,8 @@ function resetIdle(userId) {
 
   updateUserStatus(userId, "online");
   
-  // Get user type from stored user or fetch it
   const user = onlineUsers.get(userId) || {};
   
-  // Emit online status to ALL clients
   io.emit("user-online", { 
     userId, 
     userType: user.userType,
@@ -72,7 +73,6 @@ function resetIdle(userId) {
     timestamp: new Date().toISOString()
   });
   
-  // For HR users, also emit HR-specific status to ALL clients
   if (user.userType === 'hr') {
     io.emit('hr-status-update', { 
       hrId: parseInt(userId), 
@@ -85,7 +85,6 @@ function resetIdle(userId) {
   idleTimers[userId] = setTimeout(() => {
     updateUserStatus(userId, "idle");
     
-    // Emit idle status to ALL clients
     io.emit("user-idle", { 
       userId,
       userType: user.userType,
@@ -93,7 +92,6 @@ function resetIdle(userId) {
       timestamp: new Date().toISOString()
     });
     
-    // For HR users, also emit HR-specific status to ALL clients
     if (user.userType === 'hr') {
       io.emit('hr-status-update', { 
         hrId: parseInt(userId), 
@@ -107,6 +105,58 @@ function resetIdle(userId) {
   }, IDLE_TIMEOUT);
 }
 
+// ---------------------- LIVE LOCATION HANDLERS ----------------------
+function startLiveLocationSession(conversationId, userId, userType, duration) {
+  const sessionKey = `${conversationId}_${userId}`;
+  
+  if (liveLocationSessions.has(sessionKey)) {
+    stopLiveLocationSession(conversationId, userId);
+  }
+
+  const session = {
+    userId,
+    userType,
+    startTime: new Date().toISOString(),
+    duration,
+    interval: null
+  };
+
+  liveLocationSessions.set(sessionKey, session);
+  console.log(`Live location session started for conversation ${conversationId} by ${userId}`);
+
+  if (duration && duration > 0) {
+    setTimeout(() => {
+      stopLiveLocationSession(conversationId, userId);
+    }, duration * 60 * 1000);
+  }
+
+  return session;
+}
+
+function stopLiveLocationSession(conversationId, userId) {
+  const sessionKey = `${conversationId}_${userId}`;
+  const session = liveLocationSessions.get(sessionKey);
+  
+  if (session) {
+    liveLocationSessions.delete(sessionKey);
+    console.log(`Live location session ended for conversation ${conversationId} by ${userId}`);
+    
+    // Broadcast to all participants that live location has ended
+    io.to(`chat-${conversationId}`).emit('live-location-ended', {
+      conversationId,
+      userId,
+      endedAt: new Date().toISOString()
+    });
+    
+    return true;
+  }
+  
+  console.log(`No active live location session found for conversation ${conversationId} by ${userId}`);
+  return false;
+}
+
+
+
 // ---------------------- SOCKET EVENTS ----------------------
 io.on("connection", (socket) => {
   const userId = socket.handshake.query.userId;
@@ -114,19 +164,15 @@ io.on("connection", (socket) => {
   console.log("User connected:", socket.id, "with userId:", userId, "and type:", userType);
 
   if (userId) {
-    // Store user type
     const user = onlineUsers.get(userId) || {};
     user.userType = userType;
     onlineUsers.set(userId, user);
     
-    // Join personal room for targeted messages
     socket.join(`user:${userId}`);
     
-    // Join HR room if user is HR
     if (userType === 'hr') {
       socket.join('hrs');
       
-      // Broadcast to ALL connected clients that this HR is online
       io.emit('hr-status-update', { 
         hrId: parseInt(userId), 
         status: 'online',
@@ -134,7 +180,6 @@ io.on("connection", (socket) => {
         timestamp: new Date().toISOString()
       });
       
-      // Also broadcast to HR room
       io.to('hrs').emit('hr-online', { 
         hrId: parseInt(userId), 
         online: true,
@@ -146,7 +191,6 @@ io.on("connection", (socket) => {
     
     updateUserStatus(userId, "online");
     
-    // Send user online event to ALL clients
     io.emit("user-online", { 
       userId, 
       userType,
@@ -157,25 +201,20 @@ io.on("connection", (socket) => {
     resetIdle(userId);
   }
 
-  // Join custom rooms
   socket.on("join", (room) => {
     socket.join(room);
     console.log(`User ${userId} joined room: ${room}`);
   });
 
-  // Join conversation room
   socket.on("join-conversation", (conversationId) => {
     socket.join(`chat-${conversationId}`);
     console.log(`User ${userId} joined room chat-${conversationId}`);
     resetIdle(userId);
   });
 
-  // HR status change (busy/away etc.)
   socket.on("hr-status-change", (data) => {
-    // Update status
     updateUserStatus(userId, data.status);
     
-    // Broadcast to ALL clients
     io.emit('hr-status-update', {
       hrId: parseInt(userId),
       status: data.status,
@@ -185,7 +224,6 @@ io.on("connection", (socket) => {
       timestamp: new Date().toISOString()
     });
     
-    // Also broadcast to HR room
     io.to('hrs').emit("hr-status-changed", {
       hrId: parseInt(userId),
       online: data.online,
@@ -194,12 +232,11 @@ io.on("connection", (socket) => {
     });
   });
 
-  // Chat message
+  // Enhanced chat message handler for location, video, and polls
   socket.on("chat-message", async (data) => {
     try {
-      // Use the real ID if provided, otherwise fallback to Date.now()
       const msg = {
-        id: data.id || Date.now(),  // Use real ID from database if available
+        id: data.id || Date.now(),
         conversation_id: Number(data.conversationId),
         sender_id: String(data.senderId || userId),
         sender_type: data.senderType || userType,
@@ -207,40 +244,156 @@ io.on("connection", (socket) => {
         message_type: data.messageType || "text",
         created_at: new Date().toISOString(),
         
-        // Include attachment data if present
+        // Attachment fields
         attachment_url: data.attachment_url || null,
         attachment_file: data.attachment_file || null,
         attachment_name: data.attachment_name || null,
         attachment_size: data.attachment_size || null,
         attachment_type: data.attachment_type || null,
         audio_duration: data.audio_duration || null,
+        
+        // Video specific data
+        video_duration: data.video_duration || null,
+        video_thumbnail: data.video_thumbnail || null,
+        
+        // Poll data
+        poll_data: data.poll_data || null,
+        poll_id: data.poll_id || null
       };
-  
+
+      // Add location data if present
+      if (data.location_data) {
+        msg.location_data = {
+          lat: data.location_data.lat,
+          lng: data.location_data.lng,
+          address: data.location_data.address,
+          accuracy: data.location_data.accuracy
+        };
+        msg.message_type = 'location';
+        console.log(`📍 Broadcasting location message:`, msg.location_data);
+      }
+
+      // Add live location data if present
+      if (data.live_location_data) {
+        msg.live_location_data = {
+          duration: data.live_location_data.duration,
+          started_at: data.live_location_data.started_at
+        };
+        msg.message_type = 'live_location_start';
+        console.log(`🔴 Broadcasting live location start:`, msg.live_location_data);
+      }
+
+      // Log poll data if present
+      if (data.poll_data) {
+        console.log(`📊 Broadcasting poll message:`, data.poll_data);
+      }
+
       io.to(`chat-${data.conversationId}`).emit("new-message", msg);
-      console.log("Broadcasting message with attachment:", msg);
+      console.log(`Broadcasting ${msg.message_type} message to conversation ${data.conversationId}`);
+      
     } catch (error) {
       console.error("Error broadcasting message:", error);
       socket.emit("message-error", "Failed to broadcast message");
     }
   });
 
-  // New conversation created (waiting queue)
+
+  socket.on('live-location-start', (data) => {
+    const { conversationId, userId, userType, duration } = data;
+    
+    console.log(`🔴 Live location start for conversation ${conversationId} from ${userId}`);
+    
+    const sessionKey = `${conversationId}_${userId}`;
+    
+    // Store the session
+    const session = {
+      userId,
+      userType,
+      startTime: new Date().toISOString(),
+      duration,
+      active: true
+    };
+    
+    liveLocationSessions.set(sessionKey, session);
+    
+    // Broadcast to all participants that live location has started
+    io.to(`chat-${conversationId}`).emit('live-location-started', {
+      conversationId,
+      userId,
+      userType,
+      duration,
+      startTime: session.startTime
+    });
+    
+    console.log(`✅ Live location session created for conversation ${conversationId} for user ${userId}`);
+  });
+
+
+
+  // Live location update (separate from regular messages)
+  socket.on("live-location-update", (data) => {
+    const { conversationId, location, userId } = data;
+    
+    // Use the combined key format
+    const sessionKey = `${conversationId}_${userId}`;
+    
+    if (!liveLocationSessions.has(sessionKey)) {
+      console.log(`No active live location session for conversation ${conversationId} from user ${userId}`);
+      return;
+    }
+    
+    io.to(`chat-${conversationId}`).emit("live-location-update", {
+      conversationId,
+      userId,
+      userType: data.userType,
+      location: {
+        lat: location.lat,
+        lng: location.lng,
+        accuracy: location.accuracy,
+        timestamp: location.timestamp || new Date().toISOString()
+      }
+    });
+    
+    console.log(`📍 Live location update in conversation ${conversationId} from ${userId}`);
+  });
+
+  // Live location ended
+  socket.on("live-location-end", (data) => {
+    const { conversationId, userId } = data;
+    
+    const sessionKey = `${conversationId}_${userId}`;
+    
+    if (liveLocationSessions.has(sessionKey)) {
+      liveLocationSessions.delete(sessionKey);
+    }
+    
+    io.to(`chat-${conversationId}`).emit("live-location-ended", {
+      conversationId,
+      userId,
+      endedAt: new Date().toISOString()
+    });
+    
+    console.log(`🔴 Live location ended in conversation ${conversationId} for user ${userId}`);
+  });
+
+  
+
+  // New conversation created
   socket.on("new-conversation", (data) => {
     io.to('hrs').emit("new-waiting-conversation", data);
     console.log("New waiting conversation:", data);
   });
 
-  // Conversation assigned/taken
+  // Conversation assigned
   socket.on("conversation-assigned", (data) => {
     io.to('hrs').emit("conversation-assigned", data);
     console.log("Conversation assigned:", data);
   });
 
-  // NEW: Conversation referred
+  // Conversation referred
   socket.on("conversation-referred", (data) => {
     console.log("Conversation referred:", data);
     
-    // Broadcast to ALL HRs for list updates
     io.to('hrs').emit("conversation-referred", {
       to_hr_id: data.to_hr_id,
       from_hr_id: data.from_hr_id,
@@ -249,7 +402,6 @@ io.on("connection", (socket) => {
       conversation: data.conversation
     });
     
-    // Also send to the specific HR's room for targeted notification
     if (data.to_hr_id) {
       io.to(`user:${data.to_hr_id}`).emit("referral-notification", {
         from_hr_id: data.from_hr_id,
@@ -260,7 +412,6 @@ io.on("connection", (socket) => {
       console.log(`Sent targeted notification to user:${data.to_hr_id}`);
     }
     
-    // Also broadcast conversation update
     io.to('hrs').emit("conversation-updated", data.conversation);
   });
 
@@ -268,7 +419,6 @@ io.on("connection", (socket) => {
   socket.on("referral-accepted", (data) => {
     console.log("Referral accepted:", data);
     
-    // Prepare enhanced data with clear assignment info
     const enhancedData = {
       conversation_id: data.conversation_id,
       accepted_by: data.accepted_by,
@@ -283,10 +433,8 @@ io.on("connection", (socket) => {
       timestamp: new Date().toISOString()
     };
     
-    // Broadcast to ALL HRs
     io.to('hrs').emit("referral-accepted", enhancedData);
     
-    // IMPORTANT: Also broadcast to the conversation room so employee gets updated
     io.to(`chat-${data.conversation_id}`).emit("conversation-updated", {
       conversation_id: data.conversation_id,
       hr_id: data.accepted_by,
@@ -294,7 +442,6 @@ io.on("connection", (socket) => {
       status: 'active'
     });
     
-    // Also send to the original referrer specifically (if different from accepter)
     if (data.original_referrer_id && data.original_referrer_id !== data.accepted_by) {
       io.to(`user:${data.original_referrer_id}`).emit("referral-accepted-notification", {
         conversation_id: data.conversation_id,
@@ -308,7 +455,6 @@ io.on("connection", (socket) => {
   socket.on("referral-declined", (data) => {
     console.log("Referral declined:", data);
     
-    // Prepare enhanced data with clear assignment info
     const enhancedData = {
       conversation_id: data.conversation_id,
       declined_by: data.declined_by,
@@ -316,7 +462,7 @@ io.on("connection", (socket) => {
       conversation: data.conversation || {
         id: data.conversation_id,
         status: 'active',
-        hr_id: data.original_referrer_id, // Should go back to original referrer
+        hr_id: data.original_referrer_id,
         referred_to_hr_id: null,
         referred_by_hr_id: null
       },
@@ -324,10 +470,8 @@ io.on("connection", (socket) => {
       timestamp: new Date().toISOString()
     };
     
-    // Broadcast to ALL HRs
     io.to('hrs').emit("referral-declined", enhancedData);
     
-    // Send to the original referrer specifically
     if (data.original_referrer_id) {
       io.to(`user:${data.original_referrer_id}`).emit("referral-returned", {
         conversation_id: data.conversation_id,
@@ -342,12 +486,10 @@ io.on("connection", (socket) => {
     console.log('Refresh conversations requested:', data);
     
     if (data.target_user_id) {
-      // Send refresh signal only to specific user
       io.to(`user:${data.target_user_id}`).emit('refresh-conversations', {
         conversation_id: data.conversation_id
       });
     } else {
-      // Broadcast to all HRs
       io.to('hrs').emit('refresh-conversations', {
         conversation_id: data.conversation_id
       });
@@ -406,10 +548,22 @@ io.on("connection", (socket) => {
     updateUserStatus(userId, "offline");
     setUserLastSeen(userId, new Date());
     
-    // Get user type from stored user
     const user = onlineUsers.get(userId) || {};
     
-    // Emit user offline to ALL clients
+    // End any active live location sessions for this user
+    for (const [key, session] of liveLocationSessions.entries()) {
+      if (session.userId === userId) {
+        liveLocationSessions.delete(key);
+        // Extract conversationId from the key
+        const conversationId = key.split('_')[0];
+        io.to(`chat-${conversationId}`).emit('live-location-ended', {
+          conversationId: parseInt(conversationId),
+          userId,
+          endedAt: new Date().toISOString()
+        });
+      }
+    }
+    
     io.emit("user-offline", { 
       userId, 
       userType: user.userType,
@@ -417,7 +571,6 @@ io.on("connection", (socket) => {
       status: 'offline'
     });
     
-    // If HR, emit HR offline to ALL clients
     if (user.userType === 'hr') {
       io.emit('hr-status-update', { 
         hrId: parseInt(userId), 
@@ -426,7 +579,6 @@ io.on("connection", (socket) => {
         lastSeen: new Date().toISOString()
       });
       
-      // Also send to HR room
       io.to('hrs').emit("hr-offline", { 
         hrId: parseInt(userId), 
         online: false,
@@ -438,6 +590,8 @@ io.on("connection", (socket) => {
     
     console.log("User disconnected:", userId);
   });
+
+
 });
 
 server.listen(PORT, '0.0.0.0', () => {
