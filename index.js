@@ -162,6 +162,8 @@ io.on("connection", (socket) => {
   const userId = socket.handshake.query.userId;
   const userType = socket.handshake.query.userType || "employee";
   console.log("User connected:", socket.id, "with userId:", userId, "and type:", userType);
+  // Add a sequence counter for each conversation
+  const messageSequences = new Map();
 
   if (userId) {
     const user = onlineUsers.get(userId) || {};
@@ -232,64 +234,91 @@ io.on("connection", (socket) => {
     });
   });
 
-  // Enhanced chat message handler for location, video, and polls
+
+  // ADD: group member add notification
+  socket.on("group-member-added", (data) => {
+    const { conversationId, newUserId, addedBy } = data;
+    // Tell the new member to join the room
+    io.to(`user:${newUserId}`).emit("join-group", { conversationId, addedBy });
+    // Tell existing members
+    io.to(`chat-${conversationId}`).emit("group-updated", { conversationId, type: 'member_added', userId: newUserId });
+  });
+
+
+  // In your socket initialization
+  socket.on('join-conversation', (conversationId) => {
+    socket.join(`chat-${conversationId}`);
+    console.log(`User ${userId} joined room chat-${conversationId}`);
+  });
+
+  // For direct chats, also join a unique room based on user IDs
+  socket.on('join-direct-chat', (data) => {
+    const roomName = `direct-${Math.min(data.user1, data.user2)}-${Math.max(data.user1, data.user2)}`;
+    socket.join(roomName);
+    console.log(`User joined direct room: ${roomName}`);
+  });
+
+
+
+  // In your chat-message handler:
   socket.on("chat-message", async (data) => {
     try {
+      const convId = data.conversationId;
+    
+      // CRITICAL: Get current sequence for this conversation
+      let lastSeq = messageSequences.get(convId) || 0;
+      const newSeq = lastSeq + 1;
+      
+      // IMPORTANT: Update the Map BEFORE broadcasting
+      messageSequences.set(convId, newSeq);
+      
+      console.log(`📨 [SEQUENCE] Conversation ${convId}: Current lastSeq=${lastSeq}, newSeq=${newSeq}`);
+      
       const msg = {
         id: data.id || Date.now(),
-        conversation_id: Number(data.conversationId),
+        conversation_id: Number(convId),
         sender_id: String(data.senderId || userId),
         sender_type: data.senderType || userType,
         message: typeof data.message === "object" ? data.message.message : data.message,
-        message_type: data.messageType || "text",
+        message_type: data.messageType || data.message_type || "text",  // ← also check snake_case
         created_at: new Date().toISOString(),
+        sequence: newSeq,
         
-        // Attachment fields
+        // encryption fields (unchanged)
+        is_encrypted: data.is_encrypted || false,
+        encrypted_payload: data.encrypted_payload || null,
+        sender_key_fingerprint: data.sender_key_fingerprint || null,
+        
+        // attachment fields (unchanged)
         attachment_url: data.attachment_url || null,
         attachment_file: data.attachment_file || null,
         attachment_name: data.attachment_name || null,
         attachment_size: data.attachment_size || null,
         attachment_type: data.attachment_type || null,
         audio_duration: data.audio_duration || null,
-        
-        // Video specific data
         video_duration: data.video_duration || null,
         video_thumbnail: data.video_thumbnail || null,
         
-        // Poll data
+        // ← ADD THESE THREE (they were missing from the broadcast):
         poll_data: data.poll_data || null,
-        poll_id: data.poll_id || null
+        poll_id: data.poll_id || null,
+        location_data: data.location_data || null,
+        contact_data: data.contact_data || null,
       };
 
-      // Add location data if present
-      if (data.location_data) {
-        msg.location_data = {
-          lat: data.location_data.lat,
-          lng: data.location_data.lng,
-          address: data.location_data.address,
-          accuracy: data.location_data.accuracy
-        };
-        msg.message_type = 'location';
-        console.log(`📍 Broadcasting location message:`, msg.location_data);
-      }
+      console.log(`📤 [SEQUENCE] Broadcasting message ${newSeq} to conversation ${convId}`);
+      
+      // AFTER — broadcast to chat room AND notify all HRs for dashboard list update
+      io.to(`chat-${convId}`).emit("new-message", msg);
 
-      // Add live location data if present
-      if (data.live_location_data) {
-        msg.live_location_data = {
-          duration: data.live_location_data.duration,
-          started_at: data.live_location_data.started_at
-        };
-        msg.message_type = 'live_location_start';
-        console.log(`🔴 Broadcasting live location start:`, msg.live_location_data);
-      }
+      // Let the HR dashboard know a new message arrived (for badge + preview update)
+      io.to("hrs").emit("new-message", {
+        ...msg,
+        conversation_id: Number(convId),  // ensure it's always present
+      });
 
-      // Log poll data if present
-      if (data.poll_data) {
-        console.log(`📊 Broadcasting poll message:`, data.poll_data);
-      }
 
-      io.to(`chat-${data.conversationId}`).emit("new-message", msg);
-      console.log(`Broadcasting ${msg.message_type} message to conversation ${data.conversationId}`);
+
       
     } catch (error) {
       console.error("Error broadcasting message:", error);
@@ -521,14 +550,43 @@ io.on("connection", (socket) => {
     console.log(`User ${userId} stopped typing in conversation ${conversationId}`);
   });
 
-  // Mark as read
+
+  // AFTER
   socket.on("mark-as-read", ({ messageId, conversationId, readerId }) => {
     if (!conversationId || !readerId) return;
-
     markMessageAsRead(messageId, readerId);
-    io.to(`chat-${conversationId}`).emit("message-read", { messageId, userId: readerId });
+    // Include conversationId in the payload so all listeners can identify which convo was read
+    io.to(`chat-${conversationId}`).emit("message-read", {
+      messageId,
+      conversationId,          // ← added
+      readerId,                // ← renamed from userId for clarity
+      userId: readerId,        // ← keep for backward compat with chat view
+    });
     resetIdle(readerId);
   });
+
+
+
+  // NEW — dashboard emits 'mark-read', normalize it to the same logic
+  socket.on("mark-read", ({ conversation_id, hr_id }) => {
+    if (!conversation_id || !hr_id) return;
+    const conversationId = conversation_id;
+    const readerId = hr_id;
+    markMessageAsRead(null, readerId);
+    io.to(`chat-${conversationId}`).emit("message-read", {
+      conversationId,
+      readerId,
+      userId: readerId,
+    });
+    // Also notify HRs room so other HR tabs update their badge
+    io.to("hrs").emit("message-read", {
+      conversationId,
+      readerId,
+    });
+    resetIdle(String(readerId));
+  });
+
+
 
   // Deleting messages
   socket.on("message-deleted", (data) => {
