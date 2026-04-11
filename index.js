@@ -279,6 +279,8 @@ io.on("connection", (socket) => {
         conversation_id: Number(convId),
         sender_id: String(data.senderId || userId),
         sender_type: data.senderType || userType,
+        sender_name: data.senderName || null,
+        sender: data.sender || null,
         message: typeof data.message === "object" ? data.message.message : data.message,
         message_type: data.messageType || data.message_type || "text",  // ← also check snake_case
         created_at: new Date().toISOString(),
@@ -288,6 +290,10 @@ io.on("connection", (socket) => {
         is_encrypted: data.is_encrypted || false,
         encrypted_payload: data.encrypted_payload || null,
         sender_key_fingerprint: data.sender_key_fingerprint || null,
+
+        // reply to fields
+        reply_to_id: data.reply_to_id || null,   // ← add
+        reply_to: data.reply_to || null,          // ← add
         
         // attachment fields (unchanged)
         attachment_url: data.attachment_url || null,
@@ -316,9 +322,6 @@ io.on("connection", (socket) => {
         ...msg,
         conversation_id: Number(convId),  // ensure it's always present
       });
-
-
-
       
     } catch (error) {
       console.error("Error broadcasting message:", error);
@@ -327,6 +330,67 @@ io.on("connection", (socket) => {
   });
 
 
+  // Add this in the io.on("connection") block
+  socket.on("message-reaction", (data) => {
+    const { conversationId, messageId, emoji, action, reactions } = data;
+    if (!conversationId || !messageId) return;
+    
+    // Broadcast to everyone in the conversation room EXCEPT the sender
+    socket.to(`chat-${conversationId}`).emit("message-reaction", {
+      conversationId,
+      messageId,
+      emoji,
+      action,
+      reactions,
+      reactedBy: userId,
+    });
+    
+    console.log(`Reaction ${emoji} (${action}) on message ${messageId} in conversation ${conversationId}`);
+  });
+
+
+  // Pin message handler — broadcast to all participants
+  socket.on("message-pin", (data) => {
+    const { conversationId, messageId, pinned, userId, userType, messageData } = data;
+
+    if (!conversationId || !messageId) return;
+
+    // Broadcast to everyone in the conversation room EXCEPT the sender
+    socket.to(`chat-${conversationId}`).emit("message-pin-updated", {
+      conversationId,
+      messageId,
+      pinned,
+      userId: userId || socket.handshake.query.userId,
+      userType: userType || socket.handshake.query.userType,
+      messageData: messageData || null,
+      timestamp: new Date().toISOString()
+    });
+
+    console.log(`Message ${messageId} ${pinned ? 'pinned' : 'unpinned'} by user ${userId} in conversation ${conversationId}`);
+  });
+
+
+  // Add star handler for real-time star updates
+  socket.on("message-star", (data) => {
+    const { conversationId, messageId, starred, userId, userType } = data;
+    
+    if (!conversationId || !messageId) return;
+    
+    // Broadcast to everyone in the conversation room EXCEPT the sender
+    socket.to(`chat-${conversationId}`).emit("message-star-updated", {
+      conversationId,
+      messageId,
+      starred,
+      userId: userId || socket.handshake.query.userId,
+      userType: userType || socket.handshake.query.userType,
+      timestamp: new Date().toISOString()
+    });
+    
+    console.log(`Message ${messageId} ${starred ? 'starred' : 'unstarred'} by user ${userId} in conversation ${conversationId}`);
+  });
+
+  
+  // Live location end
   socket.on('live-location-start', (data) => {
     const { conversationId, userId, userType, duration } = data;
     
@@ -405,8 +469,6 @@ io.on("connection", (socket) => {
     console.log(`🔴 Live location ended in conversation ${conversationId} for user ${userId}`);
   });
 
-  
-
   // New conversation created
   socket.on("new-conversation", (data) => {
     io.to('hrs').emit("new-waiting-conversation", data);
@@ -419,30 +481,36 @@ io.on("connection", (socket) => {
     console.log("Conversation assigned:", data);
   });
 
-  // Conversation referred
-  socket.on("conversation-referred", (data) => {
-    console.log("Conversation referred:", data);
-    
-    io.to('hrs').emit("conversation-referred", {
-      to_hr_id: data.to_hr_id,
+
+// Conversation referred
+socket.on("conversation-referred", (data) => {
+  console.log("Conversation referred:", data);
+  
+  io.to('hrs').emit("conversation-referred", {
+    to_hr_id: data.to_hr_id,
+    from_hr_id: data.from_hr_id,
+    from_hr_name: data.from_hr_name,
+    conversation_id: data.conversation_id,
+    conversation: data.conversation
+  });
+  
+  if (data.to_hr_id) {
+    io.to(`user:${data.to_hr_id}`).emit("referral-notification", {
       from_hr_id: data.from_hr_id,
       from_hr_name: data.from_hr_name,
       conversation_id: data.conversation_id,
       conversation: data.conversation
     });
-    
-    if (data.to_hr_id) {
-      io.to(`user:${data.to_hr_id}`).emit("referral-notification", {
-        from_hr_id: data.from_hr_id,
-        from_hr_name: data.from_hr_name,
-        conversation_id: data.conversation_id,
-        conversation: data.conversation
-      });
-      console.log(`Sent targeted notification to user:${data.to_hr_id}`);
-    }
-    
+    console.log(`Sent targeted notification to user:${data.to_hr_id}`);
+  }
+  
+  // ✅ Only emit conversation-updated if conversation data exists
+  if (data.conversation && data.conversation.id) {
     io.to('hrs').emit("conversation-updated", data.conversation);
-  });
+  } else {
+    console.log('Skipping conversation-updated emit - no conversation data');
+  }
+});
 
   // Referral accepted
   socket.on("referral-accepted", (data) => {
@@ -565,8 +633,6 @@ io.on("connection", (socket) => {
     resetIdle(readerId);
   });
 
-
-
   // NEW — dashboard emits 'mark-read', normalize it to the same logic
   socket.on("mark-read", ({ conversation_id, hr_id }) => {
     if (!conversation_id || !hr_id) return;
@@ -585,8 +651,6 @@ io.on("connection", (socket) => {
     });
     resetIdle(String(readerId));
   });
-
-
 
   // Deleting messages
   socket.on("message-deleted", (data) => {
