@@ -236,13 +236,34 @@ io.on("connection", (socket) => {
 
 
   // ADD: group member add notification
-  socket.on("group-member-added", (data) => {
-    const { conversationId, newUserId, addedBy } = data;
-    // Tell the new member to join the room
-    io.to(`user:${newUserId}`).emit("join-group", { conversationId, addedBy });
-    // Tell existing members
-    io.to(`chat-${conversationId}`).emit("group-updated", { conversationId, type: 'member_added', userId: newUserId });
+  socket.on('group-member-added', (data) => {
+    const { conversationId, newMember, addedBy, memberIds } = data;
+    
+    // Broadcast to all members in the conversation room
+    io.to(`chat-${conversationId}`).emit('group-member-added', {
+      conversationId,
+      newMember,
+      addedBy,
+      timestamp: new Date().toISOString()
+    });
+    
+    console.log(`Member ${newMember.name} added to group ${conversationId}`);
   });
+
+
+  // Group member left (voluntarily)
+  socket.on('group-member-left', (data) => {
+    const { conversationId, leavingMember } = data;
+    
+    console.log(`🚪 Member ${leavingMember.name} left group ${conversationId}`);
+    
+    io.to(`chat-${conversationId}`).emit('group-member-left', {
+      conversationId,
+      leavingMember,
+      timestamp: new Date().toISOString()
+    });
+  });
+
 
 
   // In your socket initialization
