@@ -238,15 +238,24 @@ io.on("connection", (socket) => {
   // ADD: group member add notification
   socket.on('group-member-added', (data) => {
     const { conversationId, newMember, addedBy, memberIds } = data;
-    
-    // Broadcast to all members in the conversation room
+
+    // Broadcast to everyone already in the conversation room
     io.to(`chat-${conversationId}`).emit('group-member-added', {
       conversationId,
       newMember,
       addedBy,
       timestamp: new Date().toISOString()
     });
-    
+  
+    // ✅ Also notify the newly added member directly via their personal room
+    // so their conversations list updates even before they join the chat room
+    io.to(`user:${newMember.id}`).emit('group-member-added', {
+      conversationId,
+      newMember,
+      addedBy,
+      timestamp: new Date().toISOString()
+    });
+  
     console.log(`Member ${newMember.name} added to group ${conversationId}`);
   });
 
@@ -255,18 +264,21 @@ io.on("connection", (socket) => {
   // Group member removed (by admin)
   socket.on('group-member-removed', (data) => {
     const { conversationId, removedMember, removedBy } = data;
-    
-    console.log(`🔨 Member ${removedMember.name} was removed from group ${conversationId} by ${removedBy}`);
-    
-    // Broadcast to all members in the conversation room
+
     io.to(`chat-${conversationId}`).emit('group-member-removed', {
       conversationId,
       removedMember,
       removedBy,
       timestamp: new Date().toISOString()
     });
-    
-    console.log(`📢 Broadcasted member removal to conversation ${conversationId}`);
+  
+    // ✅ Notify removed member directly so their list updates immediately
+    io.to(`user:${removedMember.id}`).emit('group-member-removed', {
+      conversationId,
+      removedMember,
+      removedBy,
+      timestamp: new Date().toISOString()
+    });
   });
 
 
