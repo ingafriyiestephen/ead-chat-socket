@@ -251,6 +251,25 @@ io.on("connection", (socket) => {
   });
 
 
+
+  // Group member removed (by admin)
+  socket.on('group-member-removed', (data) => {
+    const { conversationId, removedMember, removedBy } = data;
+    
+    console.log(`🔨 Member ${removedMember.name} was removed from group ${conversationId} by ${removedBy}`);
+    
+    // Broadcast to all members in the conversation room
+    io.to(`chat-${conversationId}`).emit('group-member-removed', {
+      conversationId,
+      removedMember,
+      removedBy,
+      timestamp: new Date().toISOString()
+    });
+    
+    console.log(`📢 Broadcasted member removal to conversation ${conversationId}`);
+  });
+
+
   // Group member left (voluntarily)
   socket.on('group-member-left', (data) => {
     const { conversationId, leavingMember } = data;
