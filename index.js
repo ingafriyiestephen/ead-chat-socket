@@ -234,7 +234,6 @@ io.on("connection", (socket) => {
     });
   });
 
-
   // ADD: group member add notification
   socket.on('group-member-added', (data) => {
     const { conversationId, newMember, addedBy, memberIds } = data;
@@ -259,8 +258,6 @@ io.on("connection", (socket) => {
     console.log(`Member ${newMember.name} added to group ${conversationId}`);
   });
 
-
-
   // Group member removed (by admin)
   socket.on('group-member-removed', (data) => {
     const { conversationId, removedMember, removedBy } = data;
@@ -281,7 +278,6 @@ io.on("connection", (socket) => {
     });
   });
 
-
   // Group member left (voluntarily)
   socket.on('group-member-left', (data) => {
     const { conversationId, leavingMember } = data;
@@ -295,8 +291,6 @@ io.on("connection", (socket) => {
     });
   });
 
-
-
   // In your socket initialization
   socket.on('join-conversation', (conversationId) => {
     socket.join(`chat-${conversationId}`);
@@ -309,8 +303,6 @@ io.on("connection", (socket) => {
     socket.join(roomName);
     console.log(`User joined direct room: ${roomName}`);
   });
-
-
 
   // In your chat-message handler:
   socket.on("chat-message", async (data) => {
@@ -381,7 +373,6 @@ io.on("connection", (socket) => {
     }
   });
 
-
   // Add this in the io.on("connection") block
   socket.on("message-reaction", (data) => {
     const { conversationId, messageId, emoji, action, reactions } = data;
@@ -399,7 +390,6 @@ io.on("connection", (socket) => {
     
     console.log(`Reaction ${emoji} (${action}) on message ${messageId} in conversation ${conversationId}`);
   });
-
 
   // Pin message handler — broadcast to all participants
   socket.on("message-pin", (data) => {
@@ -421,7 +411,6 @@ io.on("connection", (socket) => {
     console.log(`Message ${messageId} ${pinned ? 'pinned' : 'unpinned'} by user ${userId} in conversation ${conversationId}`);
   });
 
-
   // Add star handler for real-time star updates
   socket.on("message-star", (data) => {
     const { conversationId, messageId, starred, userId, userType } = data;
@@ -441,6 +430,19 @@ io.on("connection", (socket) => {
     console.log(`Message ${messageId} ${starred ? 'starred' : 'unstarred'} by user ${userId} in conversation ${conversationId}`);
   });
 
+
+  socket.on('poll-vote-updated', (data) => {
+    const { conversationId, pollId, options, totalVotes } = data;
+    socket.to(`chat-${conversationId}`).emit('poll-vote-updated', {
+      conversationId,
+      pollId,
+      options,
+      totalVotes,
+      votedBy: userId,
+      timestamp: new Date().toISOString()
+    });
+    console.log(`Poll ${pollId} updated in conversation ${conversationId}`);
+  });
   
   // Live location end
   socket.on('live-location-start', (data) => {
@@ -472,8 +474,6 @@ io.on("connection", (socket) => {
     
     console.log(`✅ Live location session created for conversation ${conversationId} for user ${userId}`);
   });
-
-
 
   // Live location update (separate from regular messages)
   socket.on("live-location-update", (data) => {
@@ -534,35 +534,35 @@ io.on("connection", (socket) => {
   });
 
 
-// Conversation referred
-socket.on("conversation-referred", (data) => {
-  console.log("Conversation referred:", data);
-  
-  io.to('hrs').emit("conversation-referred", {
-    to_hr_id: data.to_hr_id,
-    from_hr_id: data.from_hr_id,
-    from_hr_name: data.from_hr_name,
-    conversation_id: data.conversation_id,
-    conversation: data.conversation
-  });
-  
-  if (data.to_hr_id) {
-    io.to(`user:${data.to_hr_id}`).emit("referral-notification", {
+  // Conversation referred
+  socket.on("conversation-referred", (data) => {
+    console.log("Conversation referred:", data);
+    
+    io.to('hrs').emit("conversation-referred", {
+      to_hr_id: data.to_hr_id,
       from_hr_id: data.from_hr_id,
       from_hr_name: data.from_hr_name,
       conversation_id: data.conversation_id,
       conversation: data.conversation
     });
-    console.log(`Sent targeted notification to user:${data.to_hr_id}`);
-  }
-  
-  // ✅ Only emit conversation-updated if conversation data exists
-  if (data.conversation && data.conversation.id) {
-    io.to('hrs').emit("conversation-updated", data.conversation);
-  } else {
-    console.log('Skipping conversation-updated emit - no conversation data');
-  }
-});
+    
+    if (data.to_hr_id) {
+      io.to(`user:${data.to_hr_id}`).emit("referral-notification", {
+        from_hr_id: data.from_hr_id,
+        from_hr_name: data.from_hr_name,
+        conversation_id: data.conversation_id,
+        conversation: data.conversation
+      });
+      console.log(`Sent targeted notification to user:${data.to_hr_id}`);
+    }
+    
+    // ✅ Only emit conversation-updated if conversation data exists
+    if (data.conversation && data.conversation.id) {
+      io.to('hrs').emit("conversation-updated", data.conversation);
+    } else {
+      console.log('Skipping conversation-updated emit - no conversation data');
+    }
+  });
 
   // Referral accepted
   socket.on("referral-accepted", (data) => {
@@ -669,7 +669,6 @@ socket.on("conversation-referred", (data) => {
     });
     console.log(`User ${userId} stopped typing in conversation ${conversationId}`);
   });
-
 
   // AFTER
   socket.on("mark-as-read", ({ messageId, conversationId, readerId }) => {
